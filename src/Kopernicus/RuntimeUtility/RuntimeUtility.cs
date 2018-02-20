@@ -41,11 +41,13 @@ using UnityEngine;
 namespace Kopernicus
 {
     // Mod runtime utilitues
-    [KSPAddon(KSPAddon.Startup.MainMenu, true)]
+    [KSPAddon(KSPAddon.Startup.MainMenu, false)]
     public class RuntimeUtility : MonoBehaviour
     {
         // Variables
         public MapObject previous;
+
+        static Boolean firstRun = true;
 
         // Awake() - flag this class as don't destroy on load and register delegates
         void Awake()
@@ -53,183 +55,397 @@ namespace Kopernicus
             // Don't run if Kopernicus isn't compatible
             if (!CompatibilityChecker.IsCompatible())
             {
+                firstRun = false;
                 Destroy(this);
                 return;
             }
-
+            
             // Make sure the runtime utility isn't killed
-            DontDestroyOnLoad(this);
-
-            // Init the runtime logging
-            new Logger("Kopernicus.Runtime").SetAsActive();
-
-            // Add handlers
-            GameEvents.onPartUnpack.Add(OnPartUnpack);
-            GameEvents.onLevelWasLoaded.Add(FixCameras);
-            GameEvents.onLevelWasLoaded.Add(delegate (GameScenes scene)
+            //DontDestroyOnLoad(this);
+            if (firstRun)
             {
-                if (MapView.fetch != null)
-                    MapView.fetch.max3DlineDrawDist = Single.MaxValue;
-                if (scene == GameScenes.SPACECENTER)
-                    PatchFI();
-                foreach (CelestialBody body in PSystemManager.Instance.localBodies)
-                {
-                    GameObject star = KopernicusStar.GetNearest(body).gameObject;
-                    if (body.afg != null)
-                        body.afg.sunLight = star;
-                    if (body.scaledBody.GetComponent<MaterialSetDirection>() != null)
-                        body.scaledBody.GetComponent<MaterialSetDirection>().target = star.transform;
-                    foreach (PQSMod_MaterialSetDirection msd in body.GetComponentsInChildren<PQSMod_MaterialSetDirection>(true))
-                        msd.target = star.transform;
+                // Init the runtime logging
+                new Logger("Kopernicus.Runtime").SetAsActive();
 
-                    // Contract Weight
-                    if (ContractSystem.ContractWeights != null)
+                // Add handlers
+                GameEvents.onPartUnpack.Add(OnPartUnpack);
+                GameEvents.onLevelWasLoaded.Add(FixCameras);
+                GameEvents.onLevelWasLoaded.Add(delegate (GameScenes scene)
+                {
+                    if (MapView.fetch != null)
+                        MapView.fetch.max3DlineDrawDist = Single.MaxValue;
+                    if (scene == GameScenes.SPACECENTER)
+                        PatchFI();
+                    foreach (CelestialBody body in PSystemManager.Instance.localBodies)
                     {
-                        if (body.Has("contractWeight"))
+                        GameObject star = KopernicusStar.GetNearest(body).gameObject;
+                        if (body.afg != null)
+                            body.afg.sunLight = star;
+                        if (body.scaledBody.GetComponent<MaterialSetDirection>() != null)
+                            body.scaledBody.GetComponent<MaterialSetDirection>().target = star.transform;
+                        foreach (PQSMod_MaterialSetDirection msd in body.GetComponentsInChildren<PQSMod_MaterialSetDirection>(true))
+                            msd.target = star.transform;
+
+                        // Contract Weight
+                        if (ContractSystem.ContractWeights != null)
                         {
-                            if (ContractSystem.ContractWeights.ContainsKey(body.name))
+                            if (body.Has("contractWeight"))
                             {
-                                ContractSystem.ContractWeights[body.name] = body.Get<Int32>("contractWeight");
-                            }
-                            else
-                            {
-                                ContractSystem.ContractWeights.Add(body.name, body.Get<Int32>("contractWeight"));
+                                if (ContractSystem.ContractWeights.ContainsKey(body.name))
+                                {
+                                    ContractSystem.ContractWeights[body.name] = body.Get<Int32>("contractWeight");
+                                }
+                                else
+                                {
+                                    ContractSystem.ContractWeights.Add(body.name, body.Get<Int32>("contractWeight"));
+                                }
                             }
                         }
                     }
+                    foreach (TimeOfDayAnimation anim in Resources.FindObjectsOfTypeAll<TimeOfDayAnimation>())
+                        anim.target = KopernicusStar.GetNearest(FlightGlobals.GetHomeBody()).gameObject.transform;
+                });
+                GameEvents.onProtoVesselLoad.Add(TransformBodyReferencesOnLoad);
+                GameEvents.onProtoVesselSave.Add(TransformBodyReferencesOnSave);
+
+                // Update Music Logic
+                if (MusicLogic.fetch != null && FlightGlobals.fetch != null && FlightGlobals.GetHomeBody() != null)
+                    MusicLogic.fetch.flightMusicSpaceAltitude = FlightGlobals.GetHomeBody().atmosphereDepth;
+
+
+                // Log
+                Logger.Default.Log("[Kopernicus] RuntimeUtility Started");
+                Logger.Default.Flush();
+            }
+
+            // Apply the changes to the MainMenu
+            if (Templates.kopernicusMainMenu)
+            {
+                // Get the MainMenu-Logic
+                MainMenu main = FindObjectOfType<MainMenu>();
+                if (main == null)
+                {
+                    Debug.LogError("[SigmaLog] No main menu object!");
+                    return;
                 }
-                foreach (TimeOfDayAnimation anim in Resources.FindObjectsOfTypeAll<TimeOfDayAnimation>())
-                    anim.target = KopernicusStar.GetNearest(FlightGlobals.GetHomeBody()).gameObject.transform;
-            });
-            GameEvents.onProtoVesselLoad.Add(TransformBodyReferencesOnLoad);
-            GameEvents.onProtoVesselSave.Add(TransformBodyReferencesOnSave);
+                MainMenuEnvLogic logic = main.envLogic;
 
-            // Update Music Logic
-            if (MusicLogic.fetch != null && FlightGlobals.fetch != null && FlightGlobals.GetHomeBody() != null)
-                MusicLogic.fetch.flightMusicSpaceAltitude = FlightGlobals.GetHomeBody().atmosphereDepth;
+                // Set it to Space, because the Mun-Area won't work with sth else than Mun
+                if (logic.areas.Length < 2)
+                {
+                    Debug.LogError("[SigmaLog] Not enough scenes");
+                    return;
+                }
 
-
-            // Log
-            Logger.Default.Log("[Kopernicus] RuntimeUtility Started");
-            Logger.Default.Flush();
+                logic.areas[0].SetActive(false);
+                logic.areas[1].SetActive(true);
+            }
         }
-
-        // Execute MainMenu functions
+        
         void Start()
         {
-            previous = PlanetariumCamera.fetch.initialTarget;
-            PlanetariumCamera.fetch.targets
-                .Where(m => m.celestialBody != null && (m.celestialBody.Has("barycenter") || !m.celestialBody.Get("selectable", true)))
-                .ToList()
-                .ForEach(map => PlanetariumCamera.fetch.targets.Remove(map));
-
-            // Stars
-            GameObject gob = Sun.Instance.gameObject;
-            KopernicusStar star = gob.AddComponent<KopernicusStar>();
-            Utility.CopyObjectFields(Sun.Instance, star, false);
-            DestroyImmediate(Sun.Instance);
-            Sun.Instance = star;
-
-            // LensFlares
-            gob = SunFlare.Instance.gameObject;
-            KopernicusSunFlare flare = gob.AddComponent<KopernicusSunFlare>();
-            gob.name = star.sun.name;
-            Utility.CopyObjectFields(SunFlare.Instance, flare, false);
-            DestroyImmediate(SunFlare.Instance);
-            SunFlare.Instance = star.lensFlare = flare;
-
-            // Bodies
-            Dictionary<String, KeyValuePair<CelestialBody, CelestialBody>> fixes = new Dictionary<String, KeyValuePair<CelestialBody, CelestialBody>>();
-
-            foreach (CelestialBody body in PSystemManager.Instance.localBodies)
+            // Execute MainMenu functions
+            if (firstRun)
             {
-                // More stars
-                if (body.flightGlobalsIndex != 0 && body.scaledBody.GetComponentsInChildren<SunShaderController>(true).Length > 0)
-                {
-                    GameObject starObj = Instantiate(Sun.Instance.gameObject);
-                    star = starObj.GetComponent<KopernicusStar>();
-                    star.sun = body;
-                    starObj.transform.parent = Sun.Instance.transform.parent;
-                    starObj.name = body.name;
-                    starObj.transform.localPosition = Vector3.zero;
-                    starObj.transform.localRotation = Quaternion.identity;
-                    starObj.transform.localScale = Vector3.one;
-                    starObj.transform.position = body.position;
-                    starObj.transform.rotation = body.rotation;
+                firstRun = false;
 
-                    GameObject flareObj = Instantiate(SunFlare.Instance.gameObject);
-                    flare = flareObj.GetComponent<KopernicusSunFlare>();
-                    star.lensFlare = flare;
-                    flareObj.transform.parent = SunFlare.Instance.transform.parent;
-                    flareObj.name = body.name;
-                    flareObj.transform.localPosition = Vector3.zero;
-                    flareObj.transform.localRotation = Quaternion.identity;
-                    flareObj.transform.localScale = Vector3.one;
-                    flareObj.transform.position = body.position;
-                    flareObj.transform.rotation = body.rotation;
+                previous = PlanetariumCamera.fetch.initialTarget;
+                PlanetariumCamera.fetch.targets
+                    .Where(m => m.celestialBody != null && (m.celestialBody.Has("barycenter") || !m.celestialBody.Get("selectable", true)))
+                    .ToList()
+                    .ForEach(map => PlanetariumCamera.fetch.targets.Remove(map));
+
+                // Stars
+                GameObject gob = Sun.Instance.gameObject;
+                KopernicusStar star = gob.AddComponent<KopernicusStar>();
+                Utility.CopyObjectFields(Sun.Instance, star, false);
+                DestroyImmediate(Sun.Instance);
+                Sun.Instance = star;
+
+                // LensFlares
+                gob = SunFlare.Instance.gameObject;
+                KopernicusSunFlare flare = gob.AddComponent<KopernicusSunFlare>();
+                gob.name = star.sun.name;
+                Utility.CopyObjectFields(SunFlare.Instance, flare, false);
+                DestroyImmediate(SunFlare.Instance);
+                SunFlare.Instance = star.lensFlare = flare;
+
+                // Bodies
+                Dictionary<String, KeyValuePair<CelestialBody, CelestialBody>> fixes = new Dictionary<String, KeyValuePair<CelestialBody, CelestialBody>>();
+
+                foreach (CelestialBody body in PSystemManager.Instance.localBodies)
+                {
+                    // More stars
+                    if (body.flightGlobalsIndex != 0 && body.scaledBody.GetComponentsInChildren<SunShaderController>(true).Length > 0)
+                    {
+                        GameObject starObj = Instantiate(Sun.Instance.gameObject);
+                        star = starObj.GetComponent<KopernicusStar>();
+                        star.sun = body;
+                        starObj.transform.parent = Sun.Instance.transform.parent;
+                        starObj.name = body.name;
+                        starObj.transform.localPosition = Vector3.zero;
+                        starObj.transform.localRotation = Quaternion.identity;
+                        starObj.transform.localScale = Vector3.one;
+                        starObj.transform.position = body.position;
+                        starObj.transform.rotation = body.rotation;
+
+                        GameObject flareObj = Instantiate(SunFlare.Instance.gameObject);
+                        flare = flareObj.GetComponent<KopernicusSunFlare>();
+                        star.lensFlare = flare;
+                        flareObj.transform.parent = SunFlare.Instance.transform.parent;
+                        flareObj.name = body.name;
+                        flareObj.transform.localPosition = Vector3.zero;
+                        flareObj.transform.localRotation = Quaternion.identity;
+                        flareObj.transform.localScale = Vector3.one;
+                        flareObj.transform.position = body.position;
+                        flareObj.transform.rotation = body.rotation;
+                    }
+
+                    // Post spawn patcher
+                    if (body.Has("orbitPatches"))
+                    {
+                        ConfigNode orbitNode = body.Get<ConfigNode>("orbitPatches");
+                        OrbitLoader loader = new OrbitLoader(body);
+                        Parser.LoadObjectFromConfigurationNode(loader, orbitNode, "Kopernicus");
+                        CelestialBody oldRef = body.referenceBody;
+                        body.referenceBody.orbitingBodies.Remove(body);
+
+                        CelestialBody newRef = PSystemManager.Instance.localBodies.FirstOrDefault(b => b.transform.name == loader.referenceBody);
+                        if (newRef != null)
+                        {
+                            body.orbit.referenceBody = body.orbitDriver.referenceBody = newRef;
+                        }
+                        else
+                        {
+                            // Log the exception
+                            Debug.Log("Exception: PostSpawnOrbit reference body for \"" + body.name + "\" could not be found. Missing body name is \"" + loader.referenceBody + "\".");
+
+                            // Open the Warning popup
+                            Injector.DisplayWarning();
+                        }
+
+                        fixes.Add(body.transform.name, new KeyValuePair<CelestialBody, CelestialBody>(oldRef, body.referenceBody));
+                        body.referenceBody.orbitingBodies.Add(body);
+                        body.referenceBody.orbitingBodies = body.referenceBody.orbitingBodies.OrderBy(cb => cb.orbit.semiMajorAxis).ToList();
+                        body.orbit.Init();
+                        body.orbitDriver.UpdateOrbit();
+
+                        // Calculations
+                        if (!body.Has("sphereOfInfluence"))
+                            body.sphereOfInfluence = body.orbit.semiMajorAxis * Math.Pow(body.Mass / body.orbit.referenceBody.Mass, 0.4);
+                        if (!body.Has("hillSphere"))
+                            body.hillSphere = body.orbit.semiMajorAxis * (1 - body.orbit.eccentricity) * Math.Pow(body.Mass / body.orbit.referenceBody.Mass, 0.333333333333333);
+                        if (body.solarRotationPeriod)
+                        {
+                            Double rotPeriod = Utility.FindBody(PSystemManager.Instance.systemPrefab.rootBody, body.transform.name).celestialBody.rotationPeriod;
+                            Double num1 = Math.PI * 2 * Math.Sqrt(Math.Pow(Math.Abs(body.orbit.semiMajorAxis), 3) / body.orbit.referenceBody.gravParameter);
+                            body.rotationPeriod = rotPeriod * num1 / (num1 + rotPeriod); ;
+                        }
+                    }
                 }
 
-                // Post spawn patcher
-                if (body.Has("orbitPatches"))
+                // Update the order in the tracking station
+                List<MapObject> trackingstation = new List<MapObject>();
+                Utility.DoRecursive(PSystemManager.Instance.localBodies[0], cb => cb.orbitingBodies, cb =>
                 {
-                    ConfigNode orbitNode = body.Get<ConfigNode>("orbitPatches");
-                    OrbitLoader loader = new OrbitLoader(body);
-                    Parser.LoadObjectFromConfigurationNode(loader, orbitNode, "Kopernicus");
-                    CelestialBody oldRef = body.referenceBody;
-                    body.referenceBody.orbitingBodies.Remove(body);
+                    trackingstation.Add(PlanetariumCamera.fetch.targets.Find(t => t.celestialBody == cb));
+                });
+                PlanetariumCamera.fetch.targets.Clear();
+                PlanetariumCamera.fetch.targets.AddRange(trackingstation);
 
-                    CelestialBody newRef = PSystemManager.Instance.localBodies.FirstOrDefault(b => b.transform.name == loader.referenceBody);
-                    if (newRef != null)
-                    {
-                        body.orbit.referenceBody = body.orbitDriver.referenceBody = newRef;
-                    }
-                    else
-                    {
-                        // Log the exception
-                        Debug.Log("Exception: PostSpawnOrbit reference body for \"" + body.name + "\" could not be found. Missing body name is \"" + loader.referenceBody + "\".");
+                // Update the initialTarget of the tracking station
+                Resources.FindObjectsOfTypeAll<PlanetariumCamera>().FirstOrDefault().initialTarget = Resources.FindObjectsOfTypeAll<ScaledMovement>().FirstOrDefault(o => o.celestialBody.isHomeWorld);
 
-                        // Open the Warning popup
-                        Injector.DisplayWarning();
-                    }
-
-                    fixes.Add(body.transform.name, new KeyValuePair<CelestialBody, CelestialBody>(oldRef, body.referenceBody));
-                    body.referenceBody.orbitingBodies.Add(body);
-                    body.referenceBody.orbitingBodies = body.referenceBody.orbitingBodies.OrderBy(cb => cb.orbit.semiMajorAxis).ToList();
-                    body.orbit.Init();
-                    body.orbitDriver.UpdateOrbit();
-
-                    // Calculations
-                    if (!body.Has("sphereOfInfluence"))
-                        body.sphereOfInfluence = body.orbit.semiMajorAxis * Math.Pow(body.Mass / body.orbit.referenceBody.Mass, 0.4);
-                    if (!body.Has("hillSphere"))
-                        body.hillSphere = body.orbit.semiMajorAxis * (1 - body.orbit.eccentricity) * Math.Pow(body.Mass / body.orbit.referenceBody.Mass, 0.333333333333333);
-                    if (body.solarRotationPeriod)
-                    {
-                        Double rotPeriod = Utility.FindBody(PSystemManager.Instance.systemPrefab.rootBody, body.transform.name).celestialBody.rotationPeriod;
-                        Double num1 = Math.PI * 2 * Math.Sqrt(Math.Pow(Math.Abs(body.orbit.semiMajorAxis), 3) / body.orbit.referenceBody.gravParameter);
-                        body.rotationPeriod = rotPeriod * num1 / (num1 + rotPeriod); ;
-                    }
+                // Undo stuff
+                foreach (CelestialBody b in PSystemManager.Instance.localBodies.Where(b_ => b_.Has("orbitPatches")))
+                {
+                    fixes[b.transform.name].Value.orbitingBodies.Remove(b);
+                    fixes[b.transform.name].Key.orbitingBodies.Add(b);
+                    fixes[b.transform.name].Key.orbitingBodies = fixes[b.transform.name].Key.orbitingBodies.OrderBy(cb => cb.orbit.semiMajorAxis).ToList();
                 }
             }
 
-            // Update the order in the tracking station
-            List<MapObject> trackingstation = new List<MapObject>();
-            Utility.DoRecursive(PSystemManager.Instance.localBodies[0], cb => cb.orbitingBodies, cb =>
+            // Apply the changes to the MainMenu
+            if (Templates.kopernicusMainMenu)
             {
-                trackingstation.Add(PlanetariumCamera.fetch.targets.Find(t => t.celestialBody == cb));
-            });
-            PlanetariumCamera.fetch.targets.Clear();
-            PlanetariumCamera.fetch.targets.AddRange(trackingstation);
+                // Select a random body?
+                if (Templates.randomMainMenuBodies.Any())
+                {
+                    Templates.menuBody =
+                        Templates.randomMainMenuBodies[new System.Random().Next(0, Templates.randomMainMenuBodies.Count)];
+                }
 
-            // Update the initialTarget of the tracking station
-            Resources.FindObjectsOfTypeAll<PlanetariumCamera>().FirstOrDefault().initialTarget = Resources.FindObjectsOfTypeAll<ScaledMovement>().FirstOrDefault(o => o.celestialBody.isHomeWorld);
+                // Grab the main body
+                CelestialBody planetCB = PSystemManager.Instance.localBodies.Find(b => b.transform.name == Templates.menuBody);
+                PSystemBody planet = Utility.FindBody(PSystemManager.Instance.systemPrefab.rootBody, Templates.menuBody);
+                if (planetCB == null || planet == null)
+                {
+                    planet = Utility.FindHomeBody(PSystemManager.Instance.systemPrefab.rootBody);
+                    planetCB = PSystemManager.Instance.localBodies.Find(b => b.isHomeWorld);
+                }
+                if (planet == null || planetCB == null)
+                {
+                    Debug.LogError("[Kopernicus] Could not find homeworld!");
+                    return;
+                }
 
-            // Undo stuff
-            foreach (CelestialBody b in PSystemManager.Instance.localBodies.Where(b_ => b_.Has("orbitPatches")))
-            {
-                fixes[b.transform.name].Value.orbitingBodies.Remove(b);
-                fixes[b.transform.name].Key.orbitingBodies.Add(b);
-                fixes[b.transform.name].Key.orbitingBodies = fixes[b.transform.name].Key.orbitingBodies.OrderBy(cb => cb.orbit.semiMajorAxis).ToList();
+                // Load Textures
+                OnDemand.OnDemandStorage.EnableBody(Templates.menuBody);
+
+                // Get the MainMenu-Logic
+                MainMenu main = FindObjectOfType<MainMenu>();
+                if (main == null)
+                {
+                    Debug.LogError("[Kopernicus] No main menu object!");
+                    return;
+                }
+                MainMenuEnvLogic logic = main.envLogic;
+
+                // Set it to Space, because the Mun-Area won't work with sth else than Mun
+                if (logic.areas.Length < 2)
+                {
+                    Debug.LogError("[Kopernicus] Not enough bodies");
+                    return;
+                }
+
+                // Get our active Space
+                GameObject space = logic.areas[1];
+
+                // Deactivate Kerbins Transform
+                Transform kerbin = space.transform.Find("Kerbin");
+                if (kerbin == null)
+                {
+                    Debug.LogError("[Kopernicus] No Kerbin transform!");
+                    return;
+                }
+                kerbin.gameObject.SetActive(false);
+
+                // Deactivate Muns Transform
+                Transform mun = space.transform.Find("MunPivot");
+                if (mun == null)
+                {
+                    Debug.LogError("[Kopernicus] No MunPivot transform!");
+                    return;
+                }
+                mun.gameObject.SetActive(false);
+
+                // Activate the textures
+                ScaledSpaceOnDemand od = planet.scaledVersion.GetComponentInChildren<ScaledSpaceOnDemand>();
+                if (od != null)
+                {
+                    od.Start();
+                    od.LoadTextures();
+                }
+
+                // Clone the scaledVersion and attach it to the Scene
+                GameObject menuPlanet = Instantiate(planet.scaledVersion) as GameObject;
+                menuPlanet.transform.parent = space.transform;
+
+                // Destroy stuff
+                DestroyImmediate(menuPlanet.GetComponent<ScaledSpaceFader>());
+                DestroyImmediate(menuPlanet.GetComponent<SphereCollider>());
+                DestroyImmediate(menuPlanet.GetComponentInChildren<AtmosphereFromGround>());
+                DestroyImmediate(menuPlanet.GetComponent<MaterialSetDirection>());
+
+                // That sounds funny
+                Rotato planetRotato = menuPlanet.AddComponent<Rotato>();
+                Rotato planetRefRotato = kerbin.GetComponent<Rotato>();
+                planetRotato.speed = (planetRefRotato.speed / 9284.50070356553f) * (Single)planetCB.orbitDriver.orbit.orbitalSpeed; // calc.exe for the win
+
+                // Scale the body
+                menuPlanet.transform.localScale = kerbin.localScale;
+                menuPlanet.transform.localPosition = kerbin.localPosition;
+                menuPlanet.transform.position = kerbin.position;
+
+                // And set it to layer 0
+                menuPlanet.layer = 0;
+
+                // Patch the material, because Mods like TextureReplacer run post spawn, and we'd overwrite their changes
+                menuPlanet.GetComponent<Renderer>().sharedMaterial = planetCB.scaledBody.GetComponent<Renderer>().sharedMaterial;
+
+                // Copy EVE 7.4 clouds / Rings
+                for (Int32 i = 0; i < planetCB.scaledBody.transform.childCount; i++)
+                {
+                    // Just clone everything
+                    Transform t = planetCB.scaledBody.transform.GetChild(i);
+                    if (t.gameObject.GetComponent<AtmosphereFromGround>())
+                        continue;
+                    GameObject newT = Instantiate(t.gameObject) as GameObject;
+                    newT.transform.parent = menuPlanet.transform;
+                    newT.layer = 0;
+                    newT.transform.localPosition = Vector3.zero;
+                    newT.transform.localRotation = Quaternion.identity;
+                    newT.transform.localScale = (Single)(1008 / planetCB.Radius) * Vector3.one;
+                }
+
+                // And now, create the moons
+                foreach (PSystemBody moon in planet.children)
+                {
+                    // Grab the CeletialBody of the moon
+                    CelestialBody moonCB = PSystemManager.Instance.localBodies.Find(b => b.GetTransform().name == moon.name);
+
+                    // Create the Rotation-Transforms
+                    GameObject menuMoonPivot = new GameObject(moon.name + " Pivot");
+                    menuMoonPivot.gameObject.layer = 0;
+                    menuMoonPivot.transform.position = menuPlanet.transform.position;
+
+                    // Still funny...
+                    Rotato munRotato = menuMoonPivot.AddComponent<Rotato>();
+                    Rotato refRotato = mun.GetComponent<Rotato>();
+                    munRotato.speed = (refRotato.speed / 542.494239600754f) * (Single)moonCB.GetOrbit().getOrbitalSpeedAtDistance(moonCB.GetOrbit().semiMajorAxis);
+
+                    // Activate the textures
+                    ScaledSpaceOnDemand odMoon = moon.scaledVersion.GetComponentInChildren<ScaledSpaceOnDemand>();
+                    if (odMoon != null)
+                    {
+                        odMoon.Start();
+                        odMoon.LoadTextures();
+                    }
+
+                    // Clone the scaledVersion and attach it to the pivot
+                    GameObject menuMoon = Instantiate(moon.scaledVersion) as GameObject;
+                    menuMoon.transform.parent = menuMoonPivot.transform;
+
+                    // Move and scale the menuMoon correctly
+                    menuMoon.transform.localPosition = new Vector3(-5000f * (Single)(moonCB.GetOrbit().semiMajorAxis / 12000000.0), 0f, 0f);
+                    menuMoon.transform.localScale *= 7f;
+
+                    // Destroy stuff
+                    DestroyImmediate(menuMoon.GetComponent<ScaledSpaceFader>());
+                    DestroyImmediate(menuMoon.GetComponent<SphereCollider>());
+                    DestroyImmediate(menuMoon.GetComponentInChildren<AtmosphereFromGround>());
+                    DestroyImmediate(menuMoon.GetComponent<MaterialSetDirection>());
+
+                    // More Rotato
+                    Rotato moonRotato = menuMoon.AddComponent<Rotato>();
+                    moonRotato.speed = -0.005f / (Single)(moonCB.rotationPeriod / 400.0);
+
+                    // Apply orbital stuff
+                    menuMoon.transform.Rotate(0f, (Single)moonCB.orbitDriver.orbit.LAN, 0f);
+                    menuMoon.transform.Rotate(0f, 0f, (Single)moonCB.orbitDriver.orbit.inclination);
+                    menuMoon.transform.Rotate(0f, (Single)moonCB.orbitDriver.orbit.argumentOfPeriapsis, 0f);
+
+                    // And set the layer to 0
+                    menuMoon.layer = 0;
+
+                    // Patch the material, because Mods like TextureReplacer run post spawn, and we'd overwrite their changes
+                    menuMoon.GetComponent<Renderer>().sharedMaterial = moonCB.scaledBody.GetComponent<Renderer>().sharedMaterial;
+
+                    // Copy EVE 7.4 clouds / Rings
+                    for (Int32 i = 0; i < moonCB.scaledBody.transform.childCount; i++)
+                    {
+                        Transform t = moonCB.scaledBody.transform.GetChild(i);
+                        if (t.gameObject.GetComponent<AtmosphereFromGround>())
+                            continue;
+                        GameObject newT = Instantiate(t.gameObject) as GameObject;
+                        newT.transform.parent = menuMoon.transform;
+                        newT.layer = 0;
+                        newT.transform.localPosition = Vector3.zero;
+                        newT.transform.localRotation = Quaternion.identity;
+                        newT.transform.localScale = (Single)(1008 / moonCB.Radius) * Vector3.one;
+                    }
+                }
+                Events.OnRuntimeUtilityUpdateMenu.Fire();
             }
         }
 
@@ -544,7 +760,7 @@ namespace Kopernicus
         }
 
         // Remove the Handlers
-        void OnDestroy()
+        void OnDestroyNotSureAboutThisOne()
         {
             GameEvents.onPartUnpack.Remove(OnPartUnpack);
             GameEvents.onLevelWasLoaded.Remove(FixCameras);
